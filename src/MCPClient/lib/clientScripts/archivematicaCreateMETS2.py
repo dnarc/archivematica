@@ -85,6 +85,8 @@ global globalDigiprovMDCounter
 globalDigiprovMDCounter = 0
 global fileNameToFileID  # Used for mapping structMaps included with transfer
 fileNameToFileID = {}
+global globalStructMapCounter
+globalStructMapCounter = 0
 
 global trimStructMap
 trimStructMap = None
@@ -99,6 +101,10 @@ CSV_METADATA = {}
 
 
 logger = get_script_logger("archivematica.mcp.client.createMETS2")
+
+
+FSItem = collections.namedtuple('FSItem', 'type path is_empty')
+FakeDirMdl = collections.namedtuple('FakeDirMdl', 'uuid')
 
 
 def newChild(parent, tag, text=None, tailText=None, sets=[]):
@@ -162,6 +168,8 @@ def getDublinCore(unit, id):
 
 def _get_mdl_identifiers(mdl):
     """Get identifiers of a model as a type-value 2-tuple."""
+    if isinstance(mdl, FakeDirMdl):
+        return []
     return [(idfr.type, idfr.value) for idfr in mdl.identifiers.all()]
 
 
@@ -709,7 +717,9 @@ def getIncludedStructMap(baseDirectoryPath):
 
 def createFileSec(directoryPath, parentDiv, baseDirectoryPath,
                   baseDirectoryName, fileGroupIdentifier, fileGroupType,
-                  directories, includeAmdSec=True):
+                  directories, includeAmdSec=True, normativeParentDiv=None,
+                  allPaths=None):
+
     """Creates fileSec and structMap entries for files on disk recursively.
 
     :param directoryPath: Path to recursively traverse and create METS entries for
@@ -789,10 +799,9 @@ def createFileSec(directoryPath, parentDiv, baseDirectoryPath,
             try:
                 f = File.objects.get(**kwargs)
             except File.DoesNotExist:
-                if os.path.basename(itemdirectoryPath) != '.keep':
-                    print("No uuid for file: \"", directoryPathSTR, "\"", file=sys.stderr)
-                    sharedVariablesAcrossModules.globalErrorCount += 1
-                continue
+                print('No uuid for file: "', directoryPathSTR, '"',
+                      file=sys.stderr)
+                sharedVariablesAcrossModules.globalErrorCount += 1
 
             use = f.filegrpuse
             label = f.label
@@ -1125,6 +1134,47 @@ def write_mets(tree, filename):
         f.write(fileContents)
 
 
+def add_normative_structmap_div(all_fsitems, root_el, index=0, path_to_el=None):
+    """Recursively document all of the file/dir paths in ``all_fsitems`` in the
+    lxml._Element instance ``root_el``.
+    :param list all_fsitems: contains ``FSItem`` instances crucially ordered so
+        that parent directories always precede their children.
+    :param lxml._Element root_el: root element for documenting the directory
+        structure.
+    :param int index: index of the ``FSItem()`` to document
+    :param dict path_to_el: maps paths from ``all_fsitems`` to the lxml elements
+        that document them.
+    :returns: None.
+    """
+    global globalDmdSecCounter
+    global dmdSecs
+    path_to_el = path_to_el or {'': root_el}
+    try:
+        fsitem = all_fsitems[index]
+        index += 1
+    except IndexError:
+        return
+    parent_path = os.path.dirname(fsitem.path)
+    basename = os.path.basename(fsitem.path)
+    parent_el = path_to_el[parent_path]
+    el = etree.SubElement(
+        parent_el,
+        ns.metsBNS + 'div',
+        TYPE={'dir': 'Directory'}.get(fsitem.type, 'Item'),
+        LABEL=basename)
+    if fsitem.is_empty:  # Create dmdSec for empty dirs
+        dir_mdl = FakeDirMdl(uuid=str(uuid4()))  # mint UUID
+        dirDmdSec = getDirDmdSec(dir_mdl, fsitem.path)
+        globalDmdSecCounter += 1
+        dmdSecs.append(dirDmdSec)
+        dir_dmd_id = 'dmdSec_' + str(globalDmdSecCounter)
+        dirDmdSec.set('ID', dir_dmd_id)
+        el.set('DMDID', dir_dmd_id)
+    path_to_el[fsitem.path] = el
+    add_normative_structmap_div(
+        all_fsitems, root_el, index=index, path_to_el=path_to_el)
+
+
 if __name__ == '__main__':
 
     from optparse import OptionParser
@@ -1174,23 +1224,23 @@ if __name__ == '__main__':
     objectsDirectoryPath = os.path.join(baseDirectoryPath, 'objects')
     objectsMetadataDirectoryPath = os.path.join(objectsDirectoryPath, 'metadata')
 
+    # Get all paths in the SIP as ``FSItem`` instances before deleting any
+    # empty directories. These filesystem items are crucially ordered so that
+    # directories always precede the paths of the items they contain.
+    all_fsitems = []
+    for root, dirs, files in os.walk(baseDirectoryPath):
+        if files or dirs:
+            all_fsitems.append(FSItem('dir', root, False))
+        else:
+            all_fsitems.append(FSItem('dir', root, True))
+        for file_ in files:
+            all_fsitems.append(FSItem('file', os.path.join(root, file_), False))
+
     # Delete empty directories, see #8427
     for root, dirs, files in os.walk(baseDirectoryPath, topdown=False):
         try:
             os.rmdir(root)
-            # If we just deleted an empty subdirectory of objects/ (but not of
-            # objects/metadata/), then re-create it with a .keep file in it.
-            # (This deletion and re-creation seems more efficient than calling
-            # ``os.listdir`` on every directory to see if it is empty.)
-            if (root.startswith(objectsDirectoryPath) and
-                    root != objectsDirectoryPath and
-                    not root.startswith(objectsMetadataDirectoryPath)):
-                os.makedirs(root)
-                fpath = os.path.join(root, '.keep')
-                with open(fpath, 'a'):
-                    os.utime(fpath, None)
-            else:
-                print("Deleted empty directory", root)
+            print("Deleted empty directory", root)
         except OSError:
             pass
 
@@ -1202,13 +1252,29 @@ if __name__ == '__main__':
         d.currentlocation: d for d in
         Directory.objects.filter(sip_id=fileGroupIdentifier).all()}
 
+    globalStructMapCounter += 1
     structMap = etree.Element(
-        ns.metsBNS + "structMap", TYPE='physical', ID='structMap_1',
+        ns.metsBNS + "structMap", TYPE='physical',
+        ID='structMap_{}'.format(globalStructMapCounter),
         LABEL="Archivematica default")
     sip_dir_name = os.path.basename(baseDirectoryPath.rstrip('/'))
     structMapDiv = etree.SubElement(
         structMap, ns.metsBNS + 'div', TYPE="Directory",
         LABEL=sip_dir_name)
+
+    # Create the normative structmap.
+    globalStructMapCounter += 1
+    normativeStructMap = etree.Element(
+        ns.metsBNS + 'structMap',
+        TYPE='logical',
+        ID='structMap_{}'.format(globalStructMapCounter),
+        LABEL='Normative Directory Structure')
+    normativeStructMapDiv = etree.SubElement(
+        normativeStructMap,
+        ns.metsBNS + 'div',
+        TYPE='Directory',
+        LABEL=sip_dir_name)
+    add_normative_structmap_div(all_fsitems, normativeStructMapDiv)
 
     # Get the <dmdSec> for the entire AIP; it is associated to the root
     # <mets:div> in the physical structMap.
