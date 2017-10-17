@@ -29,6 +29,7 @@ from glob import glob
 from itertools import chain
 import lxml.etree as etree
 import os
+import pprint
 import re
 import sys
 import traceback
@@ -1156,7 +1157,12 @@ def add_normative_structmap_div(all_fsitems, root_el, index=0, path_to_el=None):
         return
     parent_path = os.path.dirname(fsitem.path)
     basename = os.path.basename(fsitem.path)
-    parent_el = path_to_el[parent_path]
+    try:
+        parent_el = path_to_el[parent_path]
+    except KeyError:
+        logger.info('Unable to find parent path {} of item {} in path_to_el\n{}'.format(
+            parent_path, fsitem.path, pprint.pformat(path_to_el)))
+        raise
     el = etree.SubElement(
         parent_el,
         ns.metsBNS + 'div',
@@ -1228,7 +1234,8 @@ if __name__ == '__main__':
     # empty directories. These filesystem items are crucially ordered so that
     # directories always precede the paths of the items they contain.
     all_fsitems = []
-    for root, dirs, files in os.walk(baseDirectoryPath):
+    for root, dirs, files in os.walk(objectsDirectoryPath):
+        root = root.replace(baseDirectoryPath, '', 1)
         if files or dirs:
             all_fsitems.append(FSItem('dir', root, False))
         else:
@@ -1274,6 +1281,8 @@ if __name__ == '__main__':
         ns.metsBNS + 'div',
         TYPE='Directory',
         LABEL=sip_dir_name)
+    logger.info('all fs_items')
+    logger.info(pprint.pformat(all_fsitems))
     add_normative_structmap_div(all_fsitems, normativeStructMapDiv)
 
     # Get the <dmdSec> for the entire AIP; it is associated to the root
@@ -1340,6 +1349,8 @@ if __name__ == '__main__':
 
     root.append(fileSec)
     root.append(structMap)
+    root.append(normativeStructMap)
+
     for structMapIncl in getIncludedStructMap(baseDirectoryPath):
         root.append(structMapIncl)
 
