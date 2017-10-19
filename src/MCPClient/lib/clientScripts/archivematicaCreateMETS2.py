@@ -718,8 +718,7 @@ def getIncludedStructMap(baseDirectoryPath):
 
 def createFileSec(directoryPath, parentDiv, baseDirectoryPath,
                   baseDirectoryName, fileGroupIdentifier, fileGroupType,
-                  directories, includeAmdSec=True, normativeParentDiv=None,
-                  allPaths=None):
+                  directories, includeAmdSec=True):
 
     """Creates fileSec and structMap entries for files on disk recursively.
 
